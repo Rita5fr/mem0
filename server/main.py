@@ -3,8 +3,7 @@ import os
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Security, status, Depends
-from fastapi.security import APIKeyHeader
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
@@ -36,22 +35,6 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
 
 # ==============================================================
-# 🔒 SECURITY CONFIGURATION
-# ==============================================================
-API_KEY = os.environ.get("API_KEY")
-api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
-
-def verify_api_key(x_api_key: str = Security(api_key_header)):
-    """Middleware to verify API key on protected routes."""
-    if not API_KEY:
-        raise HTTPException(status_code=500, detail="API key not configured on server.")
-    if x_api_key != API_KEY:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, 
-            detail="Invalid or missing API key."
-        )
-
-# ==============================================================
 # 🧠 MEM0 CONFIGURATION
 # ==============================================================
 DEFAULT_CONFIG = {
@@ -74,15 +57,15 @@ DEFAULT_CONFIG = {
     "llm": {
         "provider": "openai",
         "config": {
-            "api_key": OPENAI_API_KEY, 
-            "temperature": 0.2, 
+            "api_key": OPENAI_API_KEY,
+            "temperature": 0.2,
             "model": "gpt-4.1-nano-2025-04-14"
         },
     },
     "embedder": {
         "provider": "openai",
         "config": {
-            "api_key": OPENAI_API_KEY, 
+            "api_key": OPENAI_API_KEY,
             "model": "text-embedding-3-small"
         },
     },
@@ -131,7 +114,7 @@ def set_config(config: Dict[str, Any]):
     return {"message": "Configuration set successfully"}
 
 @app.post("/memories", summary="Create memories")
-def add_memory(memory_create: MemoryCreate, _: str = Depends(verify_api_key)):
+def add_memory(memory_create: MemoryCreate):
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
         raise HTTPException(status_code=400, detail="At least one identifier required.")
     try:
@@ -143,7 +126,7 @@ def add_memory(memory_create: MemoryCreate, _: str = Depends(verify_api_key)):
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/memories", summary="Get memories")
-def get_all_memories(user_id: Optional[str] = None, run_id: Optional[str] = None, agent_id: Optional[str] = None, _: str = Depends(verify_api_key)):
+def get_all_memories(user_id: Optional[str] = None, run_id: Optional[str] = None, agent_id: Optional[str] = None):
     if not any([user_id, run_id, agent_id]):
         raise HTTPException(status_code=400, detail="At least one identifier required.")
     try:
@@ -154,7 +137,7 @@ def get_all_memories(user_id: Optional[str] = None, run_id: Optional[str] = None
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/search", summary="Search memories")
-def search_memories(search_req: SearchRequest, _: str = Depends(verify_api_key)):
+def search_memories(search_req: SearchRequest):
     try:
         params = {k: v for k, v in search_req.model_dump().items() if v is not None and k != "query"}
         return MEMORY_INSTANCE.search(query=search_req.query, **params)
@@ -163,7 +146,7 @@ def search_memories(search_req: SearchRequest, _: str = Depends(verify_api_key))
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/memories", summary="Delete all memories")
-def delete_all_memories(user_id: Optional[str] = None, run_id: Optional[str] = None, agent_id: Optional[str] = None, _: str = Depends(verify_api_key)):
+def delete_all_memories(user_id: Optional[str] = None, run_id: Optional[str] = None, agent_id: Optional[str] = None):
     if not any([user_id, run_id, agent_id]):
         raise HTTPException(status_code=400, detail="At least one identifier required.")
     try:
