@@ -3,18 +3,29 @@ import os
 import sys
 from typing import Any, Dict, List, Optional
 
-# ---------------- Path Fix (for Heroku imports) ---------------- #
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
-if ROOT_DIR not in sys.path:
-    sys.path.append(ROOT_DIR)
-logging.info(f"🧭 Added project root to sys.path: {ROOT_DIR}")
+# ==============================================================
+# 🧭 PATH FIX — ensures "openmemory" is importable on Heroku
+# ==============================================================
 
-# ---------------- Logging setup ---------------- #
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../.."))  # go up two levels: /server → /
+if PROJECT_ROOT not in sys.path:
+    sys.path.append(PROJECT_ROOT)
+logging.info(f"🔧 Added project root to sys.path: {PROJECT_ROOT}")
+logging.info(f"📁 Current working directory: {os.getcwd()}")
+
+# ==============================================================
+# 🔧 LOGGING SETUP
+# ==============================================================
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logging.info("🧰 Project root files: " + str(os.listdir(".")))
 if os.path.exists("mem0"):
     logging.info("🧰 mem0 folder: " + str(os.listdir("mem0")))
+
+# ==============================================================
+# 📦 IMPORTS
+# ==============================================================
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Security, status, Depends
@@ -23,7 +34,10 @@ from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 from mem0 import Memory
 
-# ---------------- Load environment variables ---------------- #
+# ==============================================================
+# ⚙️ LOAD ENVIRONMENT VARIABLES
+# ==============================================================
+
 load_dotenv()
 
 # ---------------- Database and service configurations ---------------- #
@@ -45,7 +59,10 @@ MEMGRAPH_PASSWORD = os.environ.get("MEMGRAPH_PASSWORD", "mem0graph")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
 
-# ---------------- Security Configuration ---------------- #
+# ==============================================================
+# 🔒 SECURITY CONFIGURATION
+# ==============================================================
+
 API_KEY = os.environ.get("API_KEY")
 api_key_header = APIKeyHeader(name="x-api-key", auto_error=False)
 
@@ -59,7 +76,10 @@ def verify_api_key(x_api_key: str = Security(api_key_header)):
             detail="Invalid or missing API key."
         )
 
-# ---------------- Mem0 Configuration ---------------- #
+# ==============================================================
+# 🧠 MEM0 CONFIGURATION
+# ==============================================================
+
 DEFAULT_CONFIG = {
     "version": "v1.1",
     "vector_store": {
@@ -97,14 +117,20 @@ DEFAULT_CONFIG = {
 
 MEMORY_INSTANCE = Memory.from_config(DEFAULT_CONFIG)
 
-# ---------------- FastAPI App ---------------- #
+# ==============================================================
+# 🚀 FASTAPI APP
+# ==============================================================
+
 app = FastAPI(
     title="Mem0 REST + MCP APIs",
     description="A REST and MCP API for managing and searching memories for your AI Agents and Apps.",
     version="1.1.0",
 )
 
-# ---------------- Data Models ---------------- #
+# ==============================================================
+# 📘 DATA MODELS
+# ==============================================================
+
 class Message(BaseModel):
     role: str = Field(..., description="Role of the message (user or assistant).")
     content: str = Field(..., description="Message content.")
@@ -125,8 +151,10 @@ class SearchRequest(BaseModel):
     agent_id: Optional[str] = None
     filters: Optional[Dict[str, Any]] = None
 
+# ==============================================================
+# 🌐 REST ROUTES
+# ==============================================================
 
-# ---------------- REST Routes ---------------- #
 @app.post("/configure", summary="Configure Mem0")
 def set_config(config: Dict[str, Any]):
     global MEMORY_INSTANCE
@@ -196,8 +224,10 @@ def delete_all_memories(
 def home():
     return RedirectResponse(url="/docs")
 
+# ==============================================================
+# 🔌 MCP INTEGRATION
+# ==============================================================
 
-# ---------------- MCP Integration ---------------- #
 try:
     from openmemory.api.app.mcp_server import setup_mcp_server
     setup_mcp_server(app)
@@ -205,4 +235,5 @@ try:
 except Exception as e:
     logging.warning(f"⚠️ MCP server not loaded: {e}")
     logging.warning(f"Python search path: {sys.path}")
-# ------------------------------------------------ #
+
+# ==============================================================
