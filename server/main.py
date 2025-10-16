@@ -1,5 +1,7 @@
 import logging
 import os
+logging.info("🧰 Project root files: " + str(os.listdir(".")))
+logging.info("🧰 mem0 folder: " + str(os.listdir("mem0")))
 from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
