@@ -187,19 +187,15 @@ def delete_all_memories(
 def home():
     return RedirectResponse(url="/docs")
 
-# ------------------------------------------------ #
-# ---------------- MCP Integration ---------------- #
 try:
-    # ✅ Adjusted for current repo structure (mem0/api/app/mcp_server.py)
     from mem0.api.app.mcp_server import setup_mcp_server
     from fastapi import APIRouter
 
     secured_mcp_router = APIRouter(dependencies=[Depends(verify_api_key)])
-    setup_mcp_server(app)  # Mounts MCP endpoints dynamically
+    setup_mcp_server(app)
     app.include_router(secured_mcp_router)
     logging.info("✅ MCP server mounted successfully.")
 except Exception as e:
     import sys
     logging.warning(f"⚠️ MCP server not loaded: {e}")
     logging.warning(f"Python search path: {sys.path}")
-# ------------------------------------------------ #
