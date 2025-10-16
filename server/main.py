@@ -49,10 +49,6 @@ DEFAULT_CONFIG = {
         "password": POSTGRES_PASSWORD,
         "collection_name": POSTGRES_COLLECTION_NAME,
         "sslmode": "require",
-        "keepalives": 1,
-        "keepalives_idle": 30,
-        "keepalives_interval": 10,
-        "keepalives_count": 5
     },
 },
     "graph_store": {
