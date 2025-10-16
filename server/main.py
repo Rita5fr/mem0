@@ -190,10 +190,10 @@ def home():
 # ------------------------------------------------ #
 # ---------------- MCP Integration ---------------- #
 try:
-    from openmemory.api.app.mcp_server import setup_mcp_server  # ✅ Correct import path
+    # ✅ Correct import path for your case
+    from mem0.openmemory.api.app.mcp_server import setup_mcp_server
     from fastapi import APIRouter
 
-    # Secure all MCP routes with the same API key
     secured_mcp_router = APIRouter(dependencies=[Depends(verify_api_key)])
     setup_mcp_server(app)  # Mounts MCP endpoints dynamically
     app.include_router(secured_mcp_router)
