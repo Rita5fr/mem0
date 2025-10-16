@@ -11,5 +11,5 @@ httpx
 python-dotenv
 requests
 mem0ai
-langchain
+langchain-neo4j
 numpy
