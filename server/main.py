@@ -7,13 +7,15 @@ from typing import Any, Dict, List, Optional
 # 🧭 PATH FIX — ensures "openmemory" is importable on Heroku
 # ==============================================================
 
+# Fix sys.path for Heroku imports
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
-PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../.."))  # go up two levels: /server → /
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
 if PROJECT_ROOT not in sys.path:
     sys.path.append(PROJECT_ROOT)
-logging.info(f"🔧 Added project root to sys.path: {PROJECT_ROOT}")
-logging.info(f"📁 Current working directory: {os.getcwd()}")
-
+OPENMEMORY_DIR = os.path.abspath(os.path.join(PROJECT_ROOT, "openmemory/api"))
+if OPENMEMORY_DIR not in sys.path:
+    sys.path.append(OPENMEMORY_DIR)
+logging.info(f"✅ Added sys.path: {sys.path}")
 # ==============================================================
 # 🔧 LOGGING SETUP
 # ==============================================================
