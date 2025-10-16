@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "mem0ai"
-version = "0.1.118"
+version = "1.0.0"
 description = "Long-term memory for AI Agents"
 authors = [
     { name = "Mem0", email = "founders@mem0.ai" }
@@ -72,6 +72,7 @@ extras = [
     "sentence-transformers>=5.0.0",
     "elasticsearch>=8.0.0,<9.0.0",
     "opensearch-py>=2.0.0",
+    "fastembed>=0.3.1",
 ]
 test = [
     "pytest>=8.2.2",
