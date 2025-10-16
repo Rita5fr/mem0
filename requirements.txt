@@ -12,7 +12,4 @@ python-dotenv
 requests
 mem0ai
 langchain
-chromadb
-sentence-transformers
 numpy
-scikit-learn
