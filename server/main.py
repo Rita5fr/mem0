@@ -188,16 +188,16 @@ def delete_all_memories(
 @app.get("/", summary="Redirect to API docs", include_in_schema=False)
 def home():
     return RedirectResponse(url="/docs")
+# ------------------------------------------------ #
+# ---------------- MCP Integration ---------------- #
+import logging
 
 try:
-    from mem0.api.app.mcp_server import setup_mcp_server
-    from fastapi import APIRouter
-
-    secured_mcp_router = APIRouter(dependencies=[Depends(verify_api_key)])
+    from openmemory.api.app.mcp_server import setup_mcp_server
     setup_mcp_server(app)
-    app.include_router(secured_mcp_router)
-    logging.info("✅ MCP server mounted successfully.")
+    logging.info("✅ MCP server successfully loaded from openmemory.api.app.mcp_server")
 except Exception as e:
     import sys
     logging.warning(f"⚠️ MCP server not loaded: {e}")
     logging.warning(f"Python search path: {sys.path}")
+# ------------------------------------------------ #
