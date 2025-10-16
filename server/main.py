@@ -1,24 +1,32 @@
 import logging
 import os
-logging.info("🧰 Project root files: " + str(os.listdir(".")))
-logging.info("🧰 mem0 folder: " + str(os.listdir("mem0")))
+import sys
 from typing import Any, Dict, List, Optional
+
+# ---------------- Path Fix (for Heroku imports) ---------------- #
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
+if ROOT_DIR not in sys.path:
+    sys.path.append(ROOT_DIR)
+logging.info(f"🧭 Added project root to sys.path: {ROOT_DIR}")
+
+# ---------------- Logging setup ---------------- #
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.info("🧰 Project root files: " + str(os.listdir(".")))
+if os.path.exists("mem0"):
+    logging.info("🧰 mem0 folder: " + str(os.listdir("mem0")))
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Security, status, Depends
 from fastapi.security import APIKeyHeader
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
-
 from mem0 import Memory
 
-# Logging setup
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
-
-# Load environment variables
+# ---------------- Load environment variables ---------------- #
 load_dotenv()
 
-# ---------------- Database and service configurations ----------------
+# ---------------- Database and service configurations ---------------- #
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
 POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
 POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
@@ -50,9 +58,8 @@ def verify_api_key(x_api_key: str = Security(api_key_header)):
             status_code=status.HTTP_401_UNAUTHORIZED, 
             detail="Invalid or missing API key."
         )
-# -------------------------------------------------------- #
 
-# ---------------- Mem0 configuration ---------------- #
+# ---------------- Mem0 Configuration ---------------- #
 DEFAULT_CONFIG = {
     "version": "v1.1",
     "vector_store": {
@@ -90,7 +97,7 @@ DEFAULT_CONFIG = {
 
 MEMORY_INSTANCE = Memory.from_config(DEFAULT_CONFIG)
 
-# ---------------- FastAPI app ---------------- #
+# ---------------- FastAPI App ---------------- #
 app = FastAPI(
     title="Mem0 REST + MCP APIs",
     description="A REST and MCP API for managing and searching memories for your AI Agents and Apps.",
@@ -117,7 +124,7 @@ class SearchRequest(BaseModel):
     run_id: Optional[str] = None
     agent_id: Optional[str] = None
     filters: Optional[Dict[str, Any]] = None
-# ------------------------------------------------ #
+
 
 # ---------------- REST Routes ---------------- #
 @app.post("/configure", summary="Configure Mem0")
@@ -188,16 +195,14 @@ def delete_all_memories(
 @app.get("/", summary="Redirect to API docs", include_in_schema=False)
 def home():
     return RedirectResponse(url="/docs")
-# ------------------------------------------------ #
-# ---------------- MCP Integration ---------------- #
-import logging
 
+
+# ---------------- MCP Integration ---------------- #
 try:
     from openmemory.api.app.mcp_server import setup_mcp_server
     setup_mcp_server(app)
     logging.info("✅ MCP server successfully loaded from openmemory.api.app.mcp_server")
 except Exception as e:
-    import sys
     logging.warning(f"⚠️ MCP server not loaded: {e}")
     logging.warning(f"Python search path: {sys.path}")
 # ------------------------------------------------ #
