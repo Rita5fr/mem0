@@ -190,8 +190,8 @@ def home():
 # ------------------------------------------------ #
 # ---------------- MCP Integration ---------------- #
 try:
-    # ✅ Correct import path for your case
-    from mem0.openmemory.api.app.mcp_server import setup_mcp_server
+    # ✅ Adjusted for current repo structure (mem0/api/app/mcp_server.py)
+    from mem0.api.app.mcp_server import setup_mcp_server
     from fastapi import APIRouter
 
     secured_mcp_router = APIRouter(dependencies=[Depends(verify_api_key)])
@@ -199,5 +199,7 @@ try:
     app.include_router(secured_mcp_router)
     logging.info("✅ MCP server mounted successfully.")
 except Exception as e:
+    import sys
     logging.warning(f"⚠️ MCP server not loaded: {e}")
+    logging.warning(f"Python search path: {sys.path}")
 # ------------------------------------------------ #
