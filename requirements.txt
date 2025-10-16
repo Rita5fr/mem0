@@ -13,3 +13,4 @@ requests
 mem0ai
 langchain-neo4j
 numpy
+rank-bm25
