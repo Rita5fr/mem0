@@ -6,7 +6,6 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
-
 from mem0 import Memory
 
 # ==============================================================
@@ -19,7 +18,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(
 # ==============================================================
 load_dotenv()
 
-# ---------------- Database and service configurations ---------------- #
 POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "postgres")
 POSTGRES_PORT = os.environ.get("POSTGRES_PORT", "5432")
 POSTGRES_DB = os.environ.get("POSTGRES_DB", "postgres")
@@ -40,17 +38,17 @@ HISTORY_DB_PATH = os.environ.get("HISTORY_DB_PATH", "/app/history/history.db")
 DEFAULT_CONFIG = {
     "version": "v1.1",
     "vector_store": {
-    "provider": "pgvector",
-    "config": {
-        "host": POSTGRES_HOST,
-        "port": int(POSTGRES_PORT),
-        "dbname": POSTGRES_DB,
-        "user": POSTGRES_USER,
-        "password": POSTGRES_PASSWORD,
-        "collection_name": POSTGRES_COLLECTION_NAME,
-        "sslmode": "require",
+        "provider": "pgvector",
+        "config": {
+            "host": POSTGRES_HOST,
+            "port": int(POSTGRES_PORT),
+            "dbname": POSTGRES_DB,
+            "user": POSTGRES_USER,
+            "password": POSTGRES_PASSWORD,
+            "collection_name": POSTGRES_COLLECTION_NAME,
+            "sslmode": "require"
+        },
     },
-},
     "graph_store": {
         "provider": "neo4j",
         "config": {"url": NEO4J_URI, "username": NEO4J_USERNAME, "password": NEO4J_PASSWORD},
@@ -73,7 +71,32 @@ DEFAULT_CONFIG = {
     "history_db_path": HISTORY_DB_PATH,
 }
 
-MEMORY_INSTANCE = Memory.from_config(DEFAULT_CONFIG)
+# ==============================================================
+# 🧩 MEMORY INITIALIZATION (with safe reconnect)
+# ==============================================================
+def create_memory_instance():
+    """Initialize Mem0 with robust Neon connection handling."""
+    try:
+        logging.info("Initializing Mem0 memory instance...")
+        memory = Memory.from_config(DEFAULT_CONFIG)
+        logging.info("✅ Mem0 initialized successfully.")
+        return memory
+    except Exception as e:
+        logging.error(f"❌ Failed to initialize Mem0: {e}")
+        raise
+
+MEMORY_INSTANCE = create_memory_instance()
+
+def get_memory_instance():
+    """Reconnects to Neon automatically if the connection is dropped."""
+    global MEMORY_INSTANCE
+    try:
+        MEMORY_INSTANCE.get_all(user_id="health_check")
+        return MEMORY_INSTANCE
+    except Exception as e:
+        logging.warning(f"🔄 Reconnecting to Neon Postgres: {e}")
+        MEMORY_INSTANCE = create_memory_instance()
+        return MEMORY_INSTANCE
 
 # ==============================================================
 # 🚀 FASTAPI APP
@@ -116,11 +139,12 @@ def set_config(config: Dict[str, Any]):
 
 @app.post("/memories", summary="Create memories")
 def add_memory(memory_create: MemoryCreate):
+    memory = get_memory_instance()
     if not any([memory_create.user_id, memory_create.agent_id, memory_create.run_id]):
         raise HTTPException(status_code=400, detail="At least one identifier required.")
     try:
         params = {k: v for k, v in memory_create.model_dump().items() if v is not None and k != "messages"}
-        response = MEMORY_INSTANCE.add(messages=[m.model_dump() for m in memory_create.messages], **params)
+        response = memory.add(messages=[m.model_dump() for m in memory_create.messages], **params)
         return JSONResponse(content=response)
     except Exception as e:
         logging.exception("Error in add_memory:")
@@ -128,31 +152,34 @@ def add_memory(memory_create: MemoryCreate):
 
 @app.get("/memories", summary="Get memories")
 def get_all_memories(user_id: Optional[str] = None, run_id: Optional[str] = None, agent_id: Optional[str] = None):
+    memory = get_memory_instance()
     if not any([user_id, run_id, agent_id]):
         raise HTTPException(status_code=400, detail="At least one identifier required.")
     try:
         params = {k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None}
-        return MEMORY_INSTANCE.get_all(**params)
+        return memory.get_all(**params)
     except Exception as e:
         logging.exception("Error in get_all_memories:")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/search", summary="Search memories")
 def search_memories(search_req: SearchRequest):
+    memory = get_memory_instance()
     try:
         params = {k: v for k, v in search_req.model_dump().items() if v is not None and k != "query"}
-        return MEMORY_INSTANCE.search(query=search_req.query, **params)
+        return memory.search(query=search_req.query, **params)
     except Exception as e:
         logging.exception("Error in search_memories:")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.delete("/memories", summary="Delete all memories")
 def delete_all_memories(user_id: Optional[str] = None, run_id: Optional[str] = None, agent_id: Optional[str] = None):
+    memory = get_memory_instance()
     if not any([user_id, run_id, agent_id]):
         raise HTTPException(status_code=400, detail="At least one identifier required.")
     try:
         params = {k: v for k, v in {"user_id": user_id, "run_id": run_id, "agent_id": agent_id}.items() if v is not None}
-        MEMORY_INSTANCE.delete_all(**params)
+        memory.delete_all(**params)
         return {"message": "All relevant memories deleted"}
     except Exception as e:
         logging.exception("Error in delete_all_memories:")
