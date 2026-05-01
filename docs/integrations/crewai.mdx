@@ -1,5 +1,6 @@
 ---
 title: CrewAI
+description: "Combine CrewAI agent-based architecture with Mem0 for persistent memory across agent interactions."
 ---
 
 Build an AI system that combines CrewAI's agent-based architecture with Mem0's memory capabilities. This integration enables persistent memory across agent interactions and personalized task execution based on user history.
@@ -21,7 +22,7 @@ pip install crewai crewai-tools mem0ai
 
 Import required modules and set up configurations:
 
-<Note>Remember to get your API keys from [Mem0 Platform](https://app.mem0.ai), [OpenAI](https://platform.openai.com) and [Serper Dev](https://serper.dev) for search capabilities.</Note>
+<Note>Remember to get your API keys from <a href="https://app.mem0.ai?utm_source=oss&utm_medium=integration-crewai" rel="nofollow">Mem0 Platform</a>, [OpenAI](https://platform.openai.com) and [Serper Dev](https://serper.dev) for search capabilities.</Note>
 
 ```python
 import os
@@ -160,9 +161,12 @@ if __name__ == "__main__":
 
 By combining CrewAI with Mem0, you can create sophisticated AI systems that maintain context and provide personalized experiences while leveraging the power of autonomous agents.
 
-## Help
+<CardGroup cols={2}>
+  <Card title="AutoGen Integration" icon="users" href="/integrations/autogen">
+    Build multi-agent systems with AutoGen and Mem0
+  </Card>
+  <Card title="LangGraph Integration" icon="diagram-project" href="/integrations/langgraph">
+    Create stateful agent workflows with memory
+  </Card>
+</CardGroup>
 
-- [CrewAI Documentation](https://docs.crewai.com/)
-- [Mem0 Platform](https://app.mem0.ai/)
-
-<Snippet file="get-help.mdx" />

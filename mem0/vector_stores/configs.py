@@ -18,6 +18,7 @@ class VectorStoreConfig(BaseModel):
         "mongodb": "MongoDBConfig",
         "milvus": "MilvusDBConfig",
         "baidu": "BaiduDBConfig",
+        "cassandra": "CassandraConfig",
         "neptune": "NeptuneAnalyticsConfig",
         "upstash_vector": "UpstashVectorConfig",
         "azure_ai_search": "AzureAISearchConfig",
@@ -33,6 +34,7 @@ class VectorStoreConfig(BaseModel):
         "faiss": "FAISSConfig",
         "langchain": "LangchainConfig",
         "s3_vectors": "S3VectorsConfig",
+        "turbopuffer": "TurbopufferConfig",
     }
 
     @model_validator(mode="after")

@@ -1,9 +1,13 @@
 ---
-title: 'Get Memories (v2)'
-openapi: post /v2/memories/
+title: "Get Memories"
+description: "Retrieve memories with paginated results and advanced filtering using logical operators like AND, OR, NOT, and comparison queries."
+openapi: post /v3/memories/
 ---
 
-The v2 get memories API is powerful and flexible, allowing for more precise memory listing without the need for a search query. It supports complex logical operations (AND, OR, NOT) and comparison operators for advanced filtering capabilities. The comparison operators include:
+List memories scoped by filters with paginated results. Entity IDs (`user_id`, `agent_id`, `app_id`, `run_id`) **must** be passed inside the `filters` object — top-level entity IDs are rejected with 400.
+
+The `filters` object supports complex logical operations (AND, OR, NOT) and comparison operators:
+
 - `in`: Matches any of the values specified
 - `gte`: Greater than or equal to
 - `lte`: Less than or equal to
@@ -13,9 +17,11 @@ The v2 get memories API is powerful and flexible, allowing for more precise memo
 - `icontains`: Case-insensitive containment check
 - `*`: Wildcard character that matches everything
 
+Pass `page` and `page_size` as query parameters to paginate through results.
+
 <CodeGroup>
 ```python Code
-memories = m.get_all(
+memories = client.get_all(
     filters={
         "AND": [
             {
@@ -25,47 +31,37 @@ memories = m.get_all(
                 "created_at": {"gte": "2024-07-01", "lte": "2024-07-31"}
             }
         ]
-    }
+    },
+    page=1,
+    page_size=50
 )
 ```
 
-```json Output
-[
+```python Output
 {
-    "id":"f38b689d-6b24-45b7-bced-17fbb4d8bac7",
-    "memory":"Name: Alex. Vegetarian. Allergic to nuts.",
-    "user_id":"alex",
-    "hash":"62bc074f56d1f909f1b4c2b639f56f6a",
-    "metadata":null,
-    "created_at":"2024-07-25T23:57:00.108347-07:00",
-    "updated_at":"2024-07-25T23:57:00.108367-07:00"
+    "count": 2,
+    "next": null,
+    "previous": null,
+    "results": [
+        {
+            "id": "f4cbdb08-7062-4f3e-8eb2-9f5c80dfe64c",
+            "memory": "Alex is planning a trip to San Francisco from July 1st to July 10th",
+            "created_at": "2024-07-01T12:00:00Z",
+            "updated_at": "2024-07-01T12:00:00Z"
+        },
+        {
+            "id": "a2b8c3d4-5e6f-7g8h-9i0j-1k2l3m4n5o6p",
+            "memory": "Alex prefers vegetarian restaurants",
+            "created_at": "2024-07-05T15:30:00Z",
+            "updated_at": "2024-07-05T15:30:00Z"
+        }
+    ]
 }
-]
 ```
+
 </CodeGroup>
 
-<CodeGroup>
-```python Wildcard Example
-# Using wildcard to get all memories for a specific user across all run_ids
-memories = m.get_all(
-    filters={
-        "AND": [
-            {
-                "user_id": "alex"
-            },
-            {
-                "run_id": "*"
-            }
-        ]
-    }
-)
-```
-</CodeGroup>
+<Info>
+The response is a paginated envelope with `count`, `next`, `previous`, and `results`. Use `page` and `page_size` query params to step through results.
+</Info>
 
-## Graph Memory
-
-To retrieve memories with graph-based relationships, pass the `enable_graph=True` parameter. This includes relationship data in the response for more contextual results.
-
-<Note>
-Learn more in the [Graph Memory documentation](/platform/features/graph-memory).
-</Note>

@@ -29,10 +29,7 @@ import os
 
 os.environ["MEM0_API_KEY"] = "your-api-key"
 
-client = MemoryClient(
-    org_id=your_org_id,
-    project_id=your_project_id
-)
+client = MemoryClient()
 ```
 
 ## Available Tools
@@ -320,6 +317,12 @@ All tools are implemented as Langchain `StructuredTool` instances, making them c
 
 Each tool provides structured input validation through Pydantic models and returns consistent responses that can be processed by your agent.
 
-## Help
+<CardGroup cols={2}>
+  <Card title="LangChain Integration" icon="link" href="/integrations/langchain">
+    Build conversational agents with LangChain and Mem0
+  </Card>
+  <Card title="LangGraph Integration" icon="diagram-project" href="/integrations/langgraph">
+    Create stateful workflows with LangGraph
+  </Card>
+</CardGroup>
 
-<Snippet file="get-help.mdx" />

@@ -1,13 +1,11 @@
 ---
 title: Custom Instructions
 description: 'Control how Mem0 extracts and stores memories using natural language guidelines'
-icon: "pencil"
-iconType: "solid"
 ---
 
 ## What are Custom Instructions?
 
-Custom instructions are natural language guidelines that tell Mem0 exactly what information to extract and remember from conversations. They act as smart filters that ensure your AI application captures only the most relevant data for your specific use case.
+Custom instructions are natural language guidelines that let you define exactly what Mem0 should include or exclude when creating memories from conversations. This gives you precise control over what information is extracted, acting as smart filters so your AI application only remembers what matters for your use case.
 
 <CodeGroup>
 ```python Python
@@ -35,7 +33,7 @@ Extract only health and wellness information:
 Exclude: Personal identifiers, financial data
 `;
 
-await client.project.update({ custom_instructions: prompt });
+await client.project.update({ customInstructions: prompt });
 ```
 </CodeGroup>
 
@@ -62,11 +60,11 @@ print(response["custom_instructions"])
 
 ```javascript JavaScript
 // Set instructions for your project
-await client.project.update({ custom_instructions: "Your guidelines here..." });
+await client.project.update({ customInstructions: "Your guidelines here..." });
 
 // Retrieve current instructions
-const response = await client.project.get({ fields: ["custom_instructions"] });
-console.log(response.custom_instructions);
+const response = await client.project.get({ fields: ["customInstructions"] });
+console.log(response.customInstructions);
 ```
 </CodeGroup>
 
@@ -147,7 +145,7 @@ Extract customer service information for better support:
 Exclude: Payment card numbers, passwords, personal identifiers.
 `;
 
-await client.project.update({ custom_instructions: instructions });
+await client.project.update({ customInstructions: instructions });
 ```
 </CodeGroup>
   </Tab>
@@ -200,7 +198,7 @@ Extract learning-related information for personalized education:
 Exclude: Specific grades, personal identifiers, financial information.
 `;
 
-await client.project.update({ custom_instructions: educationPrompt });
+await client.project.update({ customInstructions: educationPrompt });
 ```
 </CodeGroup>
   </Tab>
@@ -253,7 +251,7 @@ Extract financial planning information for advisory services:
 Exclude: Account numbers, SSNs, passwords, specific financial amounts.
 `;
 
-await client.project.update({ custom_instructions: financePrompt });
+await client.project.update({ customInstructions: financePrompt });
 ```
 </CodeGroup>
   </Tab>
@@ -304,7 +302,7 @@ messages = [
 
 # Add the messages and check extracted memories
 result = client.add(messages, user_id="test_user")
-memories = client.get_all(user_id="test_user")
+memories = client.get_all(filters={"AND": [{"user_id": "test_user"}]})
 
 # Review if the right information was extracted
 for memory in memories:
