@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
-"""Save useful coding memories and search them in later Claude Code sessions.
+"""Shared core for Mem0 agent plugins.
 
-Hooks record small session details locally. When Claude compacts or ends the
-session, Mem0 sends the useful parts of the session to Mem0 so it can create
-memories. Claude can search those memories during later work in the repository.
+Hooks record small session details locally. When the agent compacts or ends the
+session, Mem0 sends the useful parts to the platform so it can create memories.
+The agent can search those memories during later work in the repository.
 """
 
 from __future__ import annotations
 
 import functools
 import hashlib
-import html
 import json
 import math
 import os
@@ -20,20 +19,46 @@ import subprocess
 import sys
 import time
 import urllib.error
-import urllib.request
 import urllib.parse
+import urllib.request
 from dataclasses import dataclass
-from datetime import timezone, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
 import telemetry
 
-
 DEFAULT_API_URL = "https://api.mem0.ai"
-PLUGIN_VERSION = "0.3.0"
-MAX_PROMPT_CHARS = 6000
-MAX_ASSISTANT_CHARS = 6000
+PLUGIN_VERSION = "0.3.2"
+
+_harness_name: str = "generic"
+_harness_env_prefix: str = "MEM0_PLUGIN"
+_harness_data_dir_name: str = "mem0-plugin"
+_harness_source_tag: str = "mem0_plugin"
+
+
+def configure_harness(
+    name: str,
+    env_prefix: str = "",
+    data_dir_name: str = "",
+    source_tag: str = "",
+) -> None:
+    global _harness_name, _harness_env_prefix, _harness_data_dir_name, _harness_source_tag
+    _harness_name = name
+    _harness_env_prefix = env_prefix or f"MEM0_{name.upper().replace('-', '_')}"
+    _harness_data_dir_name = data_dir_name or f"{name}-plugin"
+    _harness_source_tag = source_tag or f"{name.replace('-', '_')}_plugin"
+
+
+def harness_config() -> dict[str, str]:
+    return {
+        "name": _harness_name,
+        "env_prefix": _harness_env_prefix,
+        "data_dir_name": _harness_data_dir_name,
+        "source_tag": _harness_source_tag,
+    }
+
+
 MAX_COMMAND_CHARS = 2000
 MAX_RESULT_CHARS = 2500
 MAX_EPISODE_CHARS = 12000
@@ -52,7 +77,7 @@ A completed change should produce one memory explaining the resulting behavior, 
 
 A command that failed and was then made to work should produce one memory naming the failing invocation, the error it returned, and the invocation that succeeded. Do not save one-off errors caused by an edit still in progress, transient network failures, or anything a rerun would fix on its own.
 
-Use Claude's final response for conclusions about current repository behavior. Do not save proposed or recommended changes unless the user accepted them or Claude completed them. Treat subagent responses as supporting repository evidence, not as decisions.
+Use the current coding agent's final response for conclusions about current repository behavior. Do not save proposed or recommended changes unless the user accepted them or the coding agent completed them. Treat subagent responses as supporting repository evidence, not as decisions.
 
 Write about the repository, not the user, assistant, session, or task. Do not save personal preferences. Do not save a memory that only states which repository, branch, or directory the session worked in. Do not include test results, documentation updates, release notes, or temporary state.
 
@@ -129,6 +154,11 @@ SECRET_PATTERNS = [
     re.compile(
         r"-----BEGIN [^-]*PRIVATE KEY-----.*?-----END [^-]*PRIVATE KEY-----",
         re.DOTALL,
+    ),
+    re.compile(
+        r'(?i)("(?:api[_-]?key|password|secret(?:[_-]?access[_-]?key)?'
+        r'|(?:access|refresh|session)[_-]?token|token|authorization|credential'
+        r')"\s*:\s*")(?:\\.|[^"\\])*'
     ),
 ]
 
@@ -213,13 +243,21 @@ def directory_chain(repo: RepoContext) -> list[str]:
     return ["/".join(parts[: index + 1]) for index in range(len(parts))]
 
 
+def _shared_project_ids(repo: RepoContext) -> list[str]:
+    """Current and pre-upgrade namespaces, shared by recall and explicit deletion."""
+    if not repo.identity.startswith("local:") and repo.project_id != repo.app_id:
+        return [repo.project_id, repo.app_id]
+    return [repo.project_id]
+
+
 def _search_filters(user: str, repo: RepoContext, scope: str) -> dict[str, Any]:
     """Build the scope filter: app_id scopes to the repo, then union shared and personal lanes."""
     app_scope = {"app_id": repo.app_id}
     mine = {"AND": [{"user_id": user}, app_scope]}
     if scope == "mine":
         return mine
-    shared: dict[str, Any] = {"AND": [{"agent_id": repo.project_id}, app_scope]}
+    projects = [{"AND": [{"agent_id": project_id}, app_scope]} for project_id in _shared_project_ids(repo)]
+    shared: dict[str, Any] = projects[0] if len(projects) == 1 else {"OR": projects}
     if scope == "dir" and repo.directory:
         shared = {"AND": [shared, {"metadata": {"dirs": {"contains": repo.directory}}}]}
     return {"OR": [shared, mine]}
@@ -297,9 +335,9 @@ class RepoContext:
 
 
 def _project_id(root: str, identity: str, app_id: str) -> str:
-    """The shared namespace: the repository, or a folder path hashed so same-named folders stay apart."""
+    """The shared namespace: includes a host hash so repos with the same owner/name on different hosts stay apart."""
     if not identity.startswith("local:"):
-        return app_id
+        return f"{app_id}-{hashlib.sha256(identity.encode()).hexdigest()[:10]}"
     return f"local-{app_id}-{hashlib.sha256(root.encode()).hexdigest()[:10]}"
 
 
@@ -345,8 +383,8 @@ def resolve_repo(cwd: str | None) -> RepoContext:
 def api_key() -> str:
     configured = (
         os.environ.get("MEM0_API_KEY")
+        or os.environ.get("PLUGIN_OPTION_API_KEY")
         or os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY")
-        # Compatibility with the pre-marketplace development harness.
         or os.environ.get("CLAUDE_PLUGIN_OPTION_MEM0_API_KEY")
         or ""
     ).strip()
@@ -359,9 +397,10 @@ def api_key() -> str:
 
 
 def cache_plugin_api_key() -> bool:
-    """Bridge Claude's hook-only sensitive config into plugin-owned storage."""
+    """Bridge host's hook-only sensitive config into plugin-owned storage."""
     configured = (
-        os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY")
+        os.environ.get("PLUGIN_OPTION_API_KEY")
+        or os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY")
         or os.environ.get("CLAUDE_PLUGIN_OPTION_MEM0_API_KEY")
         or ""
     ).strip()
@@ -394,6 +433,7 @@ def clear_stale_api_key_cache() -> bool:
     """Drop the cached key file once every configured key source is gone."""
     configured = (
         os.environ.get("MEM0_API_KEY")
+        or os.environ.get("PLUGIN_OPTION_API_KEY")
         or os.environ.get("CLAUDE_PLUGIN_OPTION_API_KEY")
         or os.environ.get("CLAUDE_PLUGIN_OPTION_MEM0_API_KEY")
         or ""
@@ -411,7 +451,7 @@ def clear_stale_api_key_cache() -> bool:
 
 
 def detached_process_kwargs(platform: str | None = None) -> dict:
-    """Keep a spawned worker alive after Claude Code exits, on POSIX and Windows."""
+    """Keep a spawned worker alive after the coding agent exits, on POSIX and Windows."""
     if (platform or sys.platform) == "win32":
         return {
             "creationflags": subprocess.DETACHED_PROCESS
@@ -422,7 +462,8 @@ def detached_process_kwargs(platform: str | None = None) -> dict:
 
 def _plugin_option(name: str, fallback: str = "") -> str:
     return (
-        os.environ.get(f"CLAUDE_PLUGIN_OPTION_{name.upper()}")
+        os.environ.get(f"PLUGIN_OPTION_{name.upper()}")
+        or os.environ.get(f"CLAUDE_PLUGIN_OPTION_{name.upper()}")
         or os.environ.get(fallback)
         or ""
     ).strip()
@@ -440,11 +481,14 @@ def user_id() -> str:
 
 
 def data_dir() -> Path:
-    configured = os.environ.get("MEM0_CODE_DATA_DIR") or os.environ.get(
-        "CLAUDE_PLUGIN_DATA"
+    configured = (
+        os.environ.get("MEM0_CODE_DATA_DIR")
+        or os.environ.get("MEM0_PLUGIN_DATA_DIR")
+        or os.environ.get("PLUGIN_DATA")
+        or os.environ.get("CLAUDE_PLUGIN_DATA")
     )
     return (
-        Path(configured).expanduser() if configured else Path.home() / ".mem0" / "claude-code-plugin"
+        Path(configured).expanduser() if configured else Path.home() / ".mem0" / _harness_data_dir_name
     )
 
 
@@ -464,316 +508,11 @@ def _int_option(name: str, fallback: str, default: int) -> int:
 
 
 
-def _message_content_text(content: Any) -> str:
-    """Return visible text from one Claude transcript message."""
-    if isinstance(content, str):
-        return redact(content).strip()
-    if not isinstance(content, list):
-        return ""
-    parts = []
-    for block in content:
-        if not isinstance(block, dict) or block.get("type") != "text":
-            continue
-        text = redact(block.get("text", "")).strip()
-        if text:
-            parts.append(text)
-    return "\n\n".join(parts)
-
-
-def _transcript_rows(
-    path: str, offset: int = 0
-) -> tuple[list[dict[str, Any]], int, bool]:
-    """Parse transcript rows from a byte offset, returning rows, end offset, and whether the offset was honored."""
-    if not path:
-        return [], 0, False
-    rows = []
-    try:
-        resolved = Path(path).expanduser()
-        if not 0 <= offset <= resolved.stat().st_size:
-            offset = 0
-        end = offset
-        with resolved.open("rb") as handle:
-            handle.seek(offset)
-            for line in handle:
-                if not line.endswith(b"\n"):
-                    break
-                end += len(line)
-                try:
-                    row = json.loads(line.decode("utf-8", errors="replace"))
-                except json.JSONDecodeError:
-                    continue
-                if isinstance(row, dict) and row.get("uuid"):
-                    rows.append(row)
-    except OSError:
-        return [], offset, False
-    return rows, end, offset > 0
-
-
-def _active_transcript_chain(
-    rows: list[dict[str, Any]], session_id: str
-) -> list[dict[str, Any]]:
-    """Follow the current Claude conversation branch from its latest record."""
-    by_uuid = {str(row["uuid"]): row for row in rows if row.get("uuid")}
-    leaf = next(
-        (
-            row
-            for row in reversed(rows)
-            if not row.get("isSidechain")
-            and str(row.get("sessionId") or "") == session_id
-        ),
-        None,
-    )
-    if leaf is None:
-        return []
-
-    chain = []
-    seen = set()
-    current = leaf
-    while current is not None:
-        uuid = str(current.get("uuid") or "")
-        if not uuid or uuid in seen:
-            break
-        seen.add(uuid)
-        chain.append(current)
-        current = by_uuid.get(str(current.get("parentUuid") or ""))
-    chain.reverse()
-    return chain
-
-
-def _human_prompt_text(row: dict[str, Any]) -> str:
-    if row.get("type") != "user":
-        return ""
-    origin = row.get("origin") or {}
-    if isinstance(origin, dict) and origin.get("kind") not in {None, "human"}:
-        return ""
-    message = row.get("message") or {}
-    content = message.get("content") if isinstance(message, dict) else None
-    if not isinstance(content, str):
-        return ""
-    text = redact(content).strip()
-    if text.startswith("<!-- attach -->"):
-        text = text.removeprefix("<!-- attach -->").strip()
-    ignored_prefixes = (
-        "<local-command-caveat>",
-        "<local-command-stdout>",
-        "<local-command-stderr>",
-        "<command-name>",
-        "<system-reminder>",
-        "<task-notification>",
-    )
-    return "" if text.startswith(ignored_prefixes) else text
-
-
-def _xml_value(text: str, tag: str) -> str:
-    match = re.search(fr"<{tag}>(.*?)</{tag}>", text, re.DOTALL)
-    return html.unescape(match.group(1).strip()) if match else ""
-
-
-def _agent_assignment(tool_input: dict[str, Any]) -> str:
-    prompt = redact(tool_input.get("prompt", "")).strip()
-    if not prompt:
-        return ""
-    agent_type = redact(tool_input.get("subagent_type", "agent")).strip() or "agent"
-    description = redact(tool_input.get("description", "")).strip()
-    heading = f"Subagent assignment ({agent_type}"
-    if description:
-        heading += f": {description}"
-    return f"{heading}):\n{prompt}"
-
-
-def _agent_response(tool_input: dict[str, Any], result: str) -> str:
-    result = redact(result).strip()
-    if not result or result.startswith("Async agent launched successfully."):
-        return ""
-    agent_type = redact(tool_input.get("subagent_type", "agent")).strip() or "agent"
-    description = redact(tool_input.get("description", "")).strip()
-    heading = f"Subagent response ({agent_type}"
-    if description:
-        heading += f": {description}"
-    return f"{heading}):\n{result}"
-
-
-def _tool_result_text(block: dict[str, Any]) -> str:
-    return _message_content_text(block.get("content"))
-
-
-def transcript_extraction_messages(
-    transcript_path: str,
-    session_id: str,
-    *,
-    previous_leaf_uuid: str = "",
-    prompt_hint: str = "",
-    fallback_assistant_message: str = "",
-    label_final_response: bool = False,
-    start_offset: int = 0,
-) -> tuple[list[dict[str, str]], str, int]:
-    """Read the meaningful part of the current Claude exchange.
-
-    The returned messages contain human prompts, visible Claude text, accepted
-    plans, answers collected through AskUserQuestion, and completed native
-    subagent assignments and responses. Raw tool output and hidden reasoning
-    are deliberately excluded.
-    """
-    rows, end_offset, resumed = _transcript_rows(transcript_path, start_offset)
-    chain = _active_transcript_chain(rows, session_id)
-    if not chain:
-        if resumed:
-            return [], previous_leaf_uuid, end_offset
-        fallback = redact(fallback_assistant_message).strip()
-        return (
-            ([{"role": "assistant", "content": f"Main Claude response:\n{fallback}"}]
-             if fallback
-             else []),
-            "",
-            end_offset,
-        )
-
-    leaf_uuid = str(chain[-1].get("uuid") or "")
-    if previous_leaf_uuid and leaf_uuid == previous_leaf_uuid:
-        return [], leaf_uuid, end_offset
-    start = 0
-    if previous_leaf_uuid:
-        for index, row in enumerate(chain):
-            if str(row.get("uuid") or "") == previous_leaf_uuid:
-                start = index + 1
-                break
-        else:
-            previous_leaf_uuid = ""
-    if not previous_leaf_uuid and not resumed:
-        prompt_hint = redact(prompt_hint).strip()
-        candidates = [
-            index
-            for index, row in enumerate(chain)
-            if _human_prompt_text(row)
-            and (
-                not prompt_hint
-                or _human_prompt_text(row) == prompt_hint
-            )
-        ]
-        task_notifications = [
-            index
-            for index, row in enumerate(chain)
-            if isinstance((row.get("message") or {}).get("content"), str)
-            and (row.get("message") or {})["content"].startswith("<task-notification>")
-        ]
-        if candidates:
-            start = candidates[-1]
-        elif task_notifications:
-            start = task_notifications[-1]
-
-    tool_uses: dict[str, tuple[str, dict[str, Any]]] = {}
-    for row in chain:
-        message = row.get("message") or {}
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict) or block.get("type") != "tool_use":
-                continue
-            tool_id = str(block.get("id") or "")
-            tool_input = block.get("input") or {}
-            if tool_id and isinstance(tool_input, dict):
-                tool_uses[tool_id] = (str(block.get("name") or ""), tool_input)
-
-    output: list[dict[str, str]] = []
-
-    def append(role: str, content: str) -> None:
-        content = redact(content).strip()
-        if content:
-            output.append({"role": role, "content": content})
-
-    for row in chain[start:]:
-        message = row.get("message") or {}
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role") or "")
-        content = message.get("content")
-
-        if role == "user" and isinstance(content, str):
-            if content.startswith("<task-notification>"):
-                if _xml_value(content, "status") != "completed":
-                    continue
-                tool_id = _xml_value(content, "tool-use-id")
-                tool = tool_uses.get(tool_id)
-                result = _xml_value(content, "result")
-                if tool and tool[0] == "Agent" and result:
-                    assignment = _agent_assignment(tool[1])
-                    response = _agent_response(tool[1], result)
-                    append("assistant", assignment)
-                    append("assistant", response)
-                continue
-            human = _human_prompt_text(row)
-            if human:
-                append("user", human)
-            continue
-
-        if not isinstance(content, list):
-            continue
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            block_type = block.get("type")
-            if role == "assistant" and block_type == "text":
-                append("assistant", str(block.get("text") or ""))
-                continue
-            if role != "user" or block_type != "tool_result":
-                continue
-
-            tool_id = str(block.get("tool_use_id") or "")
-            tool = tool_uses.get(tool_id)
-            if not tool:
-                continue
-            name, tool_input = tool
-            result = _tool_result_text(block)
-            failed = bool(block.get("is_error"))
-            if name == "Agent" and not failed:
-                response = _agent_response(tool_input, result)
-                if response:
-                    append("assistant", _agent_assignment(tool_input))
-                    append("assistant", response)
-            elif name == "AskUserQuestion" and result and not failed:
-                append("user", f"User answers to Claude's questions:\n{result}")
-            elif name == "ExitPlanMode" and not failed:
-                plan = redact(tool_input.get("plan", "")).strip()
-                if plan:
-                    append("assistant", f"Approved implementation plan:\n{plan}")
-
-    fallback = redact(fallback_assistant_message).strip()
-    if fallback:
-        labeled = f"Main Claude response:\n{fallback}"
-        for message in reversed(output):
-            if message["role"] == "assistant" and message["content"] == fallback:
-                message["content"] = labeled
-                break
-        else:
-            append("assistant", labeled)
-    elif label_final_response:
-        last_message = chain[-1].get("message") or {}
-        last_content = (
-            last_message.get("content") if isinstance(last_message, dict) else None
-        )
-        final_parts = [
-            redact(block.get("text", "")).strip()
-            for block in (last_content if isinstance(last_content, list) else [])
-            if isinstance(block, dict)
-            and block.get("type") == "text"
-            and redact(block.get("text", "")).strip()
-        ]
-        for start in range(len(output) - len(final_parts), -1, -1):
-            candidate = output[start : start + len(final_parts)]
-            if final_parts and [item["content"] for item in candidate] == final_parts:
-                candidate[0]["content"] = (
-                    f"Main Claude response:\n{candidate[0]['content']}"
-                )
-                break
-    return output, leaf_uuid, end_offset
-
-
 def _checkpoint_message(event: dict[str, Any]) -> str:
     kind = event.get("kind")
     payload = event.get("payload") or {}
     if kind == "user_prompt":
-        return bounded(payload.get("text", ""), MAX_PROMPT_CHARS)
+        return redact(payload.get("text", "")).strip()
     if kind == "assistant_stop":
         transcript_messages = payload.get("transcript_messages") or []
         if isinstance(transcript_messages, list):
@@ -784,9 +523,9 @@ def _checkpoint_message(event: dict[str, Any]) -> str:
             )
             if text:
                 return text
-        return bounded(payload.get("text", ""), MAX_ASSISTANT_CHARS)
-    if kind == "sidekick_stop":
-        return bounded(payload.get("final_message", ""), MAX_ASSISTANT_CHARS)
+        return redact(payload.get("text", "")).strip()
+    if kind in {"subagent_stop", "sidekick_stop"}:
+        return redact(payload.get("final_message", "")).strip()
     return ""
 
 
@@ -857,6 +596,7 @@ class EvidenceStore:
         self.conn.close()
 
     def _migrate(self) -> None:
+        # Keep the legacy table name so existing databases and in-flight workers remain compatible.
         self.conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS events (
@@ -949,8 +689,7 @@ class EvidenceStore:
 
             """
         )
-        # Remove the pre-0.1.1 no-tools snapshot implementation. The real coding
-        # sidekick is a native Claude Code agent and stores no state in this DB.
+        # Remove the pre-0.1.1 snapshot implementation.
         self.conn.executescript(
             """
             DROP TABLE IF EXISTS sidekick_calls;
@@ -998,8 +737,27 @@ class EvidenceStore:
         self.conn.commit()
         return int(cursor.lastrowid)
 
+    def record_assistant_response(self, repo: RepoContext, session_id: str, message: str) -> None:
+        """Ignore repeated response hooks until another prompt or a different answer arrives."""
+        with self.conn:
+            # Serialize the check and insert across concurrent Stop and SessionEnd hooks.
+            self.conn.execute("BEGIN IMMEDIATE")
+            previous = self.conn.execute(
+                """SELECT kind, payload_json FROM events
+                   WHERE repo_id = ? AND session_id = ? AND kind IN ('user_prompt', 'assistant_stop')
+                   ORDER BY id DESC LIMIT 1""",
+                (repo.identity, session_id),
+            ).fetchone()
+            if (
+                previous is not None
+                and previous["kind"] == "assistant_stop"
+                and json.loads(previous["payload_json"]).get("text") == message
+            ):
+                return
+            self.record_event(repo, session_id, "assistant_stop", {"text": message})
+
     def repo_for_session(self, session_id: str, cwd: str | None) -> RepoContext:
-        """Keep one project scope for every hook in a Claude Code session."""
+        """Keep one project scope for every hook in a coding-agent session."""
         current = resolve_repo(cwd)
         if session_id == "unknown-session":
             return current
@@ -1041,78 +799,77 @@ class EvidenceStore:
     def prepare_flush(
         self, repo: RepoContext, session_id: str, reason: str
     ) -> tuple[str, list[dict[str, Any]]] | None:
-        existing = self.conn.execute(
-            """SELECT * FROM flushes
-               WHERE repo_id = ? AND session_id = ?
-                 AND status NOT IN ('semantic-succeeded', 'explicitly-stored', 'gave-up')
-               ORDER BY created_at LIMIT 1""",
-            (repo.identity, session_id),
-        ).fetchone()
-        if existing and int(existing["attempts"] or 0) >= MAX_FLUSH_ATTEMPTS:
-            with self.conn:
+        with self.conn:
+            self.conn.execute("BEGIN IMMEDIATE")
+            existing = self.conn.execute(
+                """SELECT * FROM flushes
+                   WHERE repo_id = ? AND session_id = ?
+                     AND status NOT IN ('semantic-succeeded', 'explicitly-stored', 'gave-up')
+                   ORDER BY created_at LIMIT 1""",
+                (repo.identity, session_id),
+            ).fetchone()
+            if existing and int(existing["attempts"] or 0) >= MAX_FLUSH_ATTEMPTS:
                 self.conn.execute(
                     "UPDATE flushes SET status = 'gave-up', updated_at = ? WHERE packet_id = ?",
                     (utc_now(), existing["packet_id"]),
                 )
-            telemetry.record(
-                "flush",
-                repo=repo,
-                session_id=session_id,
-                reason=reason,
-                status="gave-up",
-                success=False,
-                attempts=int(existing["attempts"] or 0),
-            )
-            existing = None
-        if existing:
-            if reason != "periodic" and existing["reason"] == "periodic":
-                with self.conn:
+                telemetry.record(
+                    "flush",
+                    repo=repo,
+                    session_id=session_id,
+                    reason=reason,
+                    status="gave-up",
+                    success=False,
+                    attempts=int(existing["attempts"] or 0),
+                )
+                existing = None
+            if existing:
+                if reason != "periodic" and existing["reason"] == "periodic":
                     self.conn.execute(
                         "UPDATE flushes SET reason = ?, updated_at = ? WHERE packet_id = ?",
                         (reason, utc_now(), existing["packet_id"]),
                     )
-            existing_rows = self.conn.execute(
-                "SELECT * FROM events WHERE flush_id = ? ORDER BY id",
-                (existing["packet_id"],),
+                existing_rows = self.conn.execute(
+                    "SELECT * FROM events WHERE flush_id = ? ORDER BY id",
+                    (existing["packet_id"],),
+                ).fetchall()
+                if existing_rows:
+                    return str(existing["packet_id"]), [
+                        {
+                            "id": row["id"],
+                            "created_at": row["created_at"],
+                            "kind": row["kind"],
+                            "payload": json.loads(row["payload_json"]),
+                        }
+                        for row in existing_rows
+                    ]
+
+            rows = self.conn.execute(
+                """SELECT * FROM events
+                   WHERE repo_id = ? AND session_id = ? AND flush_id IS NULL
+                   ORDER BY id""",
+                (repo.identity, session_id),
             ).fetchall()
-            if existing_rows:
-                return str(existing["packet_id"]), [
-                    {
-                        "id": row["id"],
-                        "created_at": row["created_at"],
-                        "kind": row["kind"],
-                        "payload": json.loads(row["payload_json"]),
-                    }
-                    for row in existing_rows
-                ]
+            if not rows:
+                return None
 
-        rows = self.conn.execute(
-            """SELECT * FROM events
-               WHERE repo_id = ? AND session_id = ? AND flush_id IS NULL
-               ORDER BY id""",
-            (repo.identity, session_id),
-        ).fetchall()
-        if not rows:
-            return None
+            events = [
+                {
+                    "id": row["id"],
+                    "created_at": row["created_at"],
+                    "kind": row["kind"],
+                    "payload": json.loads(row["payload_json"]),
+                }
+                for row in rows
+            ]
+            events = select_checkpoint_events(events, force=reason != "periodic")
+            if not events:
+                return None
+            event_start, event_end = events[0]["id"], events[-1]["id"]
+            packet_material = f"{repo.identity}\0{session_id}\0{event_start}\0{event_end}"
+            packet_id = hashlib.sha256(packet_material.encode()).hexdigest()[:32]
+            now = utc_now()
 
-        events = [
-            {
-                "id": row["id"],
-                "created_at": row["created_at"],
-                "kind": row["kind"],
-                "payload": json.loads(row["payload_json"]),
-            }
-            for row in rows
-        ]
-        events = select_checkpoint_events(events, force=reason != "periodic")
-        if not events:
-            return None
-        event_start, event_end = events[0]["id"], events[-1]["id"]
-        packet_material = f"{repo.identity}\0{session_id}\0{event_start}\0{event_end}"
-        packet_id = hashlib.sha256(packet_material.encode()).hexdigest()[:32]
-        now = utc_now()
-
-        with self.conn:
             self.conn.execute(
                 """INSERT OR IGNORE INTO flushes
                    (packet_id, repo_id, app_id, session_id, reason, event_start,
@@ -1137,7 +894,7 @@ class EvidenceStore:
                 f"WHERE id IN ({placeholders}) AND flush_id IS NULL",
                 (packet_id, *event_ids),
             )
-        return packet_id, events
+            return packet_id, events
 
     def checkpoint_due(self, repo_id: str, session_id: str) -> bool:
         if self.has_inflight_flush(repo_id, session_id):
@@ -1284,7 +1041,7 @@ class EvidenceStore:
             if row["memory_text"]
         ]
 
-    def start_sidekick(
+    def start_subagent(
         self,
         repo: RepoContext,
         session_id: str,
@@ -1292,7 +1049,7 @@ class EvidenceStore:
         agent_type: str,
         context_chars: int,
     ) -> bool:
-        """Record one native sidekick instance and whether context was first sent."""
+        """Record one native subagent instance and whether context was first sent."""
         with self.conn:
             cursor = self.conn.execute(
                 """INSERT OR IGNORE INTO sidekick_runs
@@ -1310,7 +1067,7 @@ class EvidenceStore:
             )
         return int(cursor.rowcount) > 0
 
-    def stop_sidekick(
+    def stop_subagent(
         self,
         repo: RepoContext,
         session_id: str,
@@ -1318,9 +1075,19 @@ class EvidenceStore:
         agent_type: str,
         transcript_path: str,
         final_message: str,
-    ) -> None:
+    ) -> str:
         now = utc_now()
-        with self.conn:
+        self.conn.execute("BEGIN IMMEDIATE")
+        try:
+            if not agent_id:
+                rows = self.conn.execute(
+                    """SELECT agent_id FROM sidekick_runs
+                       WHERE repo_id = ? AND session_id = ? AND agent_type = ? AND stopped_at IS NULL
+                       LIMIT 2""",
+                    (repo.identity, session_id, agent_type),
+                ).fetchall()
+                # Without a host ID, overlapping runs cannot be correlated reliably.
+                agent_id = rows[0]["agent_id"] if len(rows) == 1 else f"unknown-agent-{time.time_ns()}"
             self.conn.execute(
                 """INSERT INTO sidekick_runs
                    (repo_id, session_id, agent_id, agent_type, started_at,
@@ -1338,9 +1105,14 @@ class EvidenceStore:
                     now,
                     now,
                     bounded(transcript_path, 2000),
-                    bounded(final_message, MAX_ASSISTANT_CHARS),
+                    redact(final_message).strip(),
                 ),
             )
+            self.conn.commit()
+        except Exception:
+            self.conn.rollback()
+            raise
+        return agent_id
 
     def operation(
         self,
@@ -1450,7 +1222,7 @@ class EvidenceStore:
                 cursor = self.conn.execute(
                     f"DELETE FROM {table} WHERE {column} = ?", (repo_id,)
                 )
-                removed[table] = max(int(cursor.rowcount), 0)
+                removed["subagent_runs" if table == "sidekick_runs" else table] = max(int(cursor.rowcount), 0)
         return removed
 
     def status(self, repo_id: str) -> dict[str, Any]:
@@ -1466,7 +1238,7 @@ class EvidenceStore:
                FROM operations WHERE repo_id = ? ORDER BY id DESC LIMIT 1""",
             (repo_id,),
         ).fetchone()
-        last_sidekick = self.conn.execute(
+        last_subagent = self.conn.execute(
             """SELECT session_id, agent_id, agent_type, started_at, stopped_at,
                       context_chars
                FROM sidekick_runs WHERE repo_id = ?
@@ -1478,9 +1250,9 @@ class EvidenceStore:
             "events": count("events"),
             "flushes": count("flushes"),
             "retrievals": count("retrievals"),
-            "sidekick_runs": count("sidekick_runs"),
+            "subagent_runs": count("sidekick_runs"),
             "last_operation": dict(last_operation) if last_operation else None,
-            "last_sidekick": dict(last_sidekick) if last_sidekick else None,
+            "last_subagent": dict(last_subagent) if last_subagent else None,
         }
 
 
@@ -1518,7 +1290,7 @@ def record_user_prompt(
 ) -> tuple[RepoContext, str, str, bool]:
     session_id = _session_id(hook_input)
     repo = store.repo_for_session(session_id, hook_input.get("cwd"))
-    prompt = bounded(hook_input.get("prompt", ""), MAX_PROMPT_CHARS)
+    prompt = redact(hook_input.get("prompt", "")).strip()
     is_first_prompt = not store.has_event(repo.identity, session_id, "user_prompt")
     store.record_event(repo, session_id, "user_prompt", {"text": prompt})
     return repo, session_id, prompt, is_first_prompt
@@ -1543,7 +1315,7 @@ def _tool_result_preview(response: Any) -> str:
     return bounded(response, MAX_RESULT_CHARS)
 
 
-def tool_payload(hook_input: dict[str, Any], *, failed: bool = False) -> dict[str, Any]:
+def tool_payload(hook_input: dict[str, Any], *, failed: bool | None = False) -> dict[str, Any]:
     name = str(hook_input.get("tool_name") or "unknown")
     tool_input = hook_input.get("tool_input") or {}
     if not isinstance(tool_input, dict):
@@ -1552,7 +1324,7 @@ def tool_payload(hook_input: dict[str, Any], *, failed: bool = False) -> dict[st
         "tool": name,
         "failed": failed,
         "duration_ms": hook_input.get("duration_ms"),
-        "agent_role": "sidekick" if hook_input.get("agent_id") else "main",
+        "agent_role": "subagent" if hook_input.get("agent_id") else "main",
     }
     if hook_input.get("agent_id"):
         payload["agent_id"] = bounded(hook_input["agent_id"], 200)
@@ -1597,7 +1369,7 @@ def tool_payload(hook_input: dict[str, Any], *, failed: bool = False) -> dict[st
 
 
 def record_tool(
-    store: EvidenceStore, hook_input: dict[str, Any], *, failed: bool = False
+    store: EvidenceStore, hook_input: dict[str, Any], *, failed: bool | None = False
 ) -> None:
     session_id = _session_id(hook_input)
     repo = store.repo_for_session(session_id, hook_input.get("cwd"))
@@ -1612,76 +1384,33 @@ def record_tool(
     )
 
 
-def record_stop(
-    store: EvidenceStore, hook_input: dict[str, Any]
-) -> tuple[RepoContext, str]:
-    session_id = _session_id(hook_input)
-    repo = store.repo_for_session(session_id, hook_input.get("cwd"))
-    message = bounded(hook_input.get("last_assistant_message", ""), MAX_ASSISTANT_CHARS)
-    previous_stop = store.latest_event_payload(
-        repo.identity, session_id, "assistant_stop"
-    )
-    latest_prompt = store.latest_event_payload(repo.identity, session_id, "user_prompt")
-    transcript_path = str(hook_input.get("transcript_path") or "")
-    previous_offset = previous_stop.get("transcript_offset")
-    start_offset = (
-        previous_offset
-        if isinstance(previous_offset, int)
-        and str(previous_stop.get("transcript_path") or "") == transcript_path
-        else 0
-    )
-    transcript_messages, leaf_uuid, end_offset = transcript_extraction_messages(
-        transcript_path,
-        session_id,
-        previous_leaf_uuid=str(previous_stop.get("transcript_leaf_uuid") or ""),
-        prompt_hint=str(latest_prompt.get("text") or ""),
-        fallback_assistant_message=message,
-        label_final_response=True,
-        start_offset=start_offset,
-    )
-    if transcript_messages:
-        payload: dict[str, Any] = {
-            "text": message,
-            "transcript_messages": transcript_messages,
-        }
-        if leaf_uuid:
-            payload["transcript_leaf_uuid"] = leaf_uuid
-        if transcript_path:
-            payload["transcript_path"] = transcript_path
-            payload["transcript_offset"] = end_offset
-        store.record_event(
-            repo, session_id, "assistant_stop", payload
-        )
-    return repo, session_id
-
-
-def record_sidekick_start(
+def record_subagent_start(
     store: EvidenceStore, hook_input: dict[str, Any]
 ) -> str:
-    """Record a native sidekick and reuse the main turn's retrieved memories."""
+    """Record a native subagent and reuse the main turn's retrieved memories."""
     session_id = _session_id(hook_input)
     repo = store.repo_for_session(session_id, hook_input.get("cwd"))
     agent_id = bounded(hook_input.get("agent_id", "unknown-agent"), 200)
-    agent_type = bounded(hook_input.get("agent_type", "mem0:sidekick"), 200)
+    agent_type = bounded(hook_input.get("agent_type", "unknown-agent"), 200)
     context = combine_context(
         format_context(store.injected_memories(session_id, repo.identity))
     )
-    first_start = store.start_sidekick(
+    first_start = store.start_subagent(
         repo, session_id, agent_id, agent_type, len(context)
     )
     store.record_event(
         repo,
         session_id,
-        "sidekick_start",
+        "subagent_start",
         {
             "agent_id": agent_id,
             "agent_type": agent_type,
             "context_chars": len(context) if first_start else 0,
-            "worktree_root": bounded(repo.root, 2000),
+            "repo_root": bounded(repo.root, 2000),
         },
     )
     telemetry.record(
-        "sidekick",
+        "subagent",
         repo=repo,
         session_id=session_id,
         phase="start",
@@ -1691,16 +1420,14 @@ def record_sidekick_start(
     return context if first_start else ""
 
 
-def record_sidekick_stop(store: EvidenceStore, hook_input: dict[str, Any]) -> None:
+def record_subagent_stop(store: EvidenceStore, hook_input: dict[str, Any]) -> None:
     session_id = _session_id(hook_input)
     repo = store.repo_for_session(session_id, hook_input.get("cwd"))
-    agent_id = bounded(hook_input.get("agent_id", "unknown-agent"), 200)
-    agent_type = bounded(hook_input.get("agent_type", "mem0:sidekick"), 200)
-    final_message = bounded(
-        hook_input.get("last_assistant_message", ""), MAX_ASSISTANT_CHARS
-    )
+    agent_type = bounded(hook_input.get("agent_type", "unknown-agent"), 200)
+    agent_id = bounded(hook_input.get("agent_id", ""), 200)
+    final_message = redact(hook_input.get("last_assistant_message", "")).strip()
     transcript_path = bounded(hook_input.get("agent_transcript_path", ""), 2000)
-    store.stop_sidekick(
+    agent_id = store.stop_subagent(
         repo,
         session_id,
         agent_id,
@@ -1711,7 +1438,7 @@ def record_sidekick_stop(store: EvidenceStore, hook_input: dict[str, Any]) -> No
     store.record_event(
         repo,
         session_id,
-        "sidekick_stop",
+        "subagent_stop",
         {
             "agent_id": agent_id,
             "agent_type": agent_type,
@@ -1720,7 +1447,7 @@ def record_sidekick_stop(store: EvidenceStore, hook_input: dict[str, Any]) -> No
         },
     )
     telemetry.record(
-        "sidekick",
+        "subagent",
         repo=repo,
         session_id=session_id,
         phase="stop",
@@ -1775,19 +1502,19 @@ def build_episode(
     task_outcome: str = "",
 ) -> tuple[str, dict[str, Any]]:
     prompts = [
-        bounded(e["payload"].get("text", ""), MAX_PROMPT_CHARS)
+        redact(e["payload"].get("text", "")).strip()
         for e in events
         if e["kind"] == "user_prompt" and e["payload"].get("text")
     ]
     assistant_conclusions = [
-        bounded(e["payload"].get("text", ""), MAX_ASSISTANT_CHARS)
+        redact(e["payload"].get("text", "")).strip()
         for e in events
         if e["kind"] == "assistant_stop" and e["payload"].get("text")
     ]
-    sidekick_outcomes = [
-        bounded(e["payload"].get("final_message", ""), MAX_ASSISTANT_CHARS)
+    subagent_outcomes = [
+        redact(e["payload"].get("final_message", "")).strip()
         for e in events
-        if e["kind"] == "sidekick_stop" and e["payload"].get("final_message")
+        if e["kind"] in {"subagent_stop", "sidekick_stop"} and e["payload"].get("final_message")
     ]
     tools = [
         e["payload"] for e in events if e["kind"] in {"tool_result", "tool_failure"}
@@ -1812,7 +1539,7 @@ def build_episode(
         {
             "command": t.get("command", ""),
             "kind": t.get("command_kind", "shell"),
-            "status": "failed" if t.get("failed") else "succeeded",
+            "status": "unknown" if t.get("failed", False) is None else "failed" if t.get("failed") else "succeeded",
             "result": t.get("result_preview", ""),
         }
         for t in tools
@@ -1820,10 +1547,7 @@ def build_episode(
     ]
 
     task = bounded(canonical_task or (prompts[0] if prompts else ""), 4000)
-    conclusion = bounded(
-        assistant_conclusions[-1] if assistant_conclusions else "",
-        MAX_ASSISTANT_CHARS,
-    )
+    conclusion = redact(assistant_conclusions[-1] if assistant_conclusions else "").strip()
     outcome = bounded(task_outcome, 2000)
 
     extraction_messages: list[dict[str, str]] = []
@@ -1835,16 +1559,14 @@ def build_episode(
             pending_user_messages.append(
                 {
                     "role": "user",
-                    "content": bounded(
-                        event["payload"].get("text", ""), MAX_PROMPT_CHARS
-                    ),
+                    "content": redact(event["payload"].get("text", "")).strip(),
                 }
             )
         elif event["kind"] == "assistant_stop":
             transcript_messages = event["payload"].get("transcript_messages") or []
             if isinstance(transcript_messages, list) and transcript_messages:
                 transcript_users = {
-                    str(message.get("content") or "").strip()
+                    redact(message.get("content") or "").strip()
                     for message in transcript_messages
                     if isinstance(message, dict) and message.get("role") == "user"
                 }
@@ -1856,7 +1578,7 @@ def build_episode(
                 extraction_messages.extend(
                     {
                         "role": str(message.get("role") or ""),
-                        "content": str(message.get("content") or ""),
+                        "content": redact(message.get("content") or "").strip(),
                     }
                     for message in transcript_messages
                     if isinstance(message, dict)
@@ -1869,14 +1591,11 @@ def build_episode(
                     extraction_messages.append(
                         {
                             "role": "assistant",
-                            "content": bounded(
-                                event["payload"].get("text", ""),
-                                MAX_ASSISTANT_CHARS,
-                            ),
+                            "content": redact(event["payload"].get("text", "")).strip(),
                         }
                     )
             pending_user_messages = []
-        elif event["kind"] == "sidekick_stop":
+        elif event["kind"] in {"subagent_stop", "sidekick_stop"}:
             pass
     extraction_messages.extend(pending_user_messages)
 
@@ -1892,7 +1611,7 @@ def build_episode(
         "assistant_conclusion": conclusion,
         "user_messages": prompts,
         "assistant_outcomes": assistant_conclusions,
-        "sidekick_outcomes": sidekick_outcomes,
+        "subagent_outcomes": subagent_outcomes,
         "extraction_messages": extraction_messages,
         "files_read": read_paths[:50],
         "files_modified": modified_paths[:50],
@@ -1972,7 +1691,7 @@ def build_extraction_messages(structured: dict[str, Any]) -> list[dict[str, str]
     """Build the session messages sent to Mem0 for memory extraction."""
     evidence = build_semantic_evidence(structured)
     messages = [
-        {"role": message["role"], "content": message["content"]}
+        {"role": message["role"], "content": redact(message["content"]).strip()}
         for message in structured.get("extraction_messages", [])
         if message.get("role") in {"user", "assistant"} and message.get("content")
     ]
@@ -2014,7 +1733,7 @@ def extraction_message_batches(
     *,
     max_tokens: int = MAX_EXTRACTION_INPUT_TOKENS,
 ) -> list[list[dict[str, str]]]:
-    """Split large extraction input without cutting messages or agent pairs."""
+    """Keep exchanges together when possible; split oversized messages to enforce the request budget."""
     if not messages or _message_tokens(messages) <= max_tokens:
         return [messages]
 
@@ -2047,9 +1766,29 @@ def extraction_message_batches(
                 units.append([message])
                 index += 1
 
+    bounded_units: list[list[dict[str, str]]] = []
+    for unit in units:
+        if _message_tokens(unit) <= max_tokens:
+            bounded_units.append(unit)
+            continue
+        for message in unit:
+            remaining = message["content"]
+            while remaining:
+                low, high = 0, len(remaining)
+                while low < high:
+                    middle = (low + high + 1) // 2
+                    if _message_tokens([{**message, "content": remaining[:middle]}]) <= max_tokens:
+                        low = middle
+                    else:
+                        high = middle - 1
+                if low == 0:
+                    raise ValueError("Extraction token budget cannot fit a message")
+                bounded_units.append([{**message, "content": remaining[:low]}])
+                remaining = remaining[low:]
+
     batches: list[list[dict[str, str]]] = []
     batch: list[dict[str, str]] = []
-    for unit in units:
+    for unit in bounded_units:
         candidate = [*batch, *unit]
         if batch and _message_tokens(candidate) > max_tokens:
             batches.append(batch)
@@ -2061,6 +1800,34 @@ def extraction_message_batches(
     return batches
 
 
+# Platform surface attribution. Read from the generated per-host module so a new
+# entrypoint is correct without remembering to configure anything.
+try:  # pragma: no cover - absent only in the un-built shared source tree
+    from _harness_id import PLATFORM_APPLICATION as _PLATFORM_APPLICATION
+    from _harness_id import PLATFORM_SOURCE as _PLATFORM_SOURCE
+except ImportError:
+    _PLATFORM_SOURCE = "MEM0_PLUGIN"
+    _PLATFORM_APPLICATION = ""
+
+
+def platform_headers(key: str) -> dict[str, str]:
+    """Auth plus the three surface-identity headers.
+
+    X-Mem0-Source and X-Application are set-once by contract: this is the
+    outermost layer, so it sets them, and nothing below may overwrite them.
+    X-Mem0-Client is append-only — anything downstream adds itself to the tail.
+    """
+    headers = {
+        "Authorization": f"Token {key}",
+        "Content-Type": "application/json",
+        "X-Mem0-Source": _PLATFORM_SOURCE,
+        "X-Mem0-Client": f"mem0-plugin/{PLUGIN_VERSION}",
+    }
+    if _PLATFORM_APPLICATION:
+        headers["X-Application"] = _PLATFORM_APPLICATION
+    return headers
+
+
 def _request_json(
     url: str, key: str, payload: dict[str, Any], timeout: float
 ) -> tuple[dict[str, Any] | list[Any], int, int]:
@@ -2068,7 +1835,7 @@ def _request_json(
     request = urllib.request.Request(
         url,
         data=raw,
-        headers={"Authorization": f"Token {key}", "Content-Type": "application/json"},
+        headers=platform_headers(key),
         method="POST",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -2095,7 +1862,7 @@ def _get_json(
 ) -> tuple[dict[str, Any] | list[Any], int]:
     request = urllib.request.Request(
         url,
-        headers={"Authorization": f"Token {key}", "Content-Type": "application/json"},
+        headers=platform_headers(key),
         method="GET",
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
@@ -2152,6 +1919,11 @@ def _wait_for_event(api_url: str, key: str, event_id: str) -> tuple[str, int, in
                 key,
                 min(10, poll_seconds + 5),
             )
+        except urllib.error.HTTPError as exc:
+            if exc.code not in {408, 429} and exc.code < 500:
+                raise
+            time.sleep(poll_seconds)
+            continue
         except (urllib.error.URLError, TimeoutError, OSError):
             # The extraction job is durable server-side. A transient polling
             # failure must not discard a job that may still complete normally.
@@ -2217,7 +1989,7 @@ def flush_session(
         task_outcome=bounded(hook_input.get("task_outcome", ""), 2000),
     )
 
-    metadata = {"source": "claude_code_plugin"}
+    metadata = {"source": _harness_source_tag}
     if repo.branch and repo.branch not in {"detached", "unknown"}:
         metadata["branch"] = repo.branch
     if repo.head_sha:
@@ -2236,6 +2008,13 @@ def flush_session(
         "user_id": write_user,
         "app_id": repo.app_id,
         "run_id": session_id,
+        # Top level, not metadata: the backend reads `source` from the body or
+        # the query string, never from metadata, which is where this used to
+        # sit. The X-Mem0-Source header is also read, but only from the
+        # platform release that ships alongside this change, so the body value
+        # is what makes attribution work on both. The harness tag stays in
+        # metadata as hook provenance.
+        "source": _PLATFORM_SOURCE,
         "metadata": {**metadata, "author": write_user, "dirs": directory_chain(repo)},
         "agent_custom_instructions": PROJECT_MEMORY_INSTRUCTIONS,
         "custom_instructions": PERSONAL_MEMORY_INSTRUCTIONS,
@@ -2684,7 +2463,7 @@ def format_context(
 
 
 def format_search_result(result: MemorySearchResult) -> str:
-    """Return only the text Claude needs from an explicit memory search."""
+    """Return only the text the coding agent needs from an explicit memory search."""
     if not result.succeeded:
         return "Memory search failed."
     if result.memories:
@@ -2731,7 +2510,11 @@ def _scoped_memory_ids(
         app_id_prefix=prefix,
     )
     if include_project:
-        _collect_memory_ids(api_url, key, {"agent_id": repo.project_id}, ids, seen)
+        for project_id in _shared_project_ids(repo):
+            _collect_memory_ids(
+                api_url, key, {"agent_id": project_id}, ids, seen,
+                app_id_prefix=prefix,
+            )
     return ids
 
 
@@ -2775,7 +2558,7 @@ def _collect_memory_ids(
 def _delete_memory(api_url: str, key: str, memory_id: str) -> bool:
     request = urllib.request.Request(
         f"{api_url}/v1/memories/{urllib.parse.quote(memory_id)}/",
-        headers={"Authorization": f"Token {key}", "Content-Type": "application/json"},
+        headers=platform_headers(key),
         method="DELETE",
     )
     try:

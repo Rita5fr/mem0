@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expose Mem0's memory search as one local Claude Code tool."""
+"""Expose Mem0's memory search as one local coding-agent tool."""
 
 from __future__ import annotations
 
@@ -11,12 +11,12 @@ from typing import Any
 import telemetry
 from memory_core import (
     CODING_MEMORY_CATEGORY_NAMES,
+    PLUGIN_VERSION,
+    SEARCH_SCOPES,
     format_search_result,
     resolve_repo,
-    SEARCH_SCOPES,
     search_memories,
 )
-
 
 PROTOCOL_VERSION = "2024-11-05"
 TOOL_NAME = "search_memories"
@@ -30,8 +30,7 @@ TOOL_DESCRIPTION = (
     "invocation works. The scope argument changes what is searched: 'repo' "
     "(default) is the whole repository's shared memory plus your own "
     "preferences, 'dir' narrows the shared part to the directory you are "
-    "working in, and 'mine' is your preferences alone. Pass run_id to look "
-    "at one earlier Claude Code session only."
+    "working in, and 'mine' is your preferences alone."
 )
 TOOL_SCHEMA = {
     "type": "object",
@@ -65,8 +64,10 @@ TOOL_SCHEMA = {
         "run_id": {
             "type": "string",
             "minLength": 1,
-            "maxLength": 200,
-            "description": "Optional Claude Code session ID. Restricts the search to memories written from that session.",
+            "description": (
+                "Optional coding-agent session ID. With any scope, restricts results to memories "
+                "saved in that session. Omit to recall memories across sessions."
+            ),
         },
     },
     "required": ["query"],
@@ -110,16 +111,17 @@ def _validate_arguments(
         raise ToolInputError(f"scope must be one of {list(SEARCH_SCOPES)}.")
 
     run_id = arguments.get("run_id")
-    if run_id is not None and (
-        not isinstance(run_id, str) or not run_id.strip() or len(run_id) > 200
-    ):
-        raise ToolInputError("run_id must be a non-empty string of at most 200 characters.")
+    if run_id is not None:
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ToolInputError("run_id must be a non-empty string.")
+        run_id = run_id.strip()
+
     return query, top_k, category, scope, run_id
 
 
-def call_search_memories(arguments: Any) -> str:
+def call_search_memories(arguments: Any, cwd: str | None = None) -> str:
     query, top_k, category, scope, run_id = _validate_arguments(arguments)
-    repo = resolve_repo(os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
+    repo = resolve_repo(cwd or os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd())
     result = search_memories(
         None,
         repo,
@@ -132,6 +134,19 @@ def call_search_memories(arguments: Any) -> str:
         operation="mcp-search",
     )
     return format_search_result(result)
+
+
+def _workspace_cwd(params: dict[str, Any]) -> str | None:
+    meta = params.get("_meta")
+    if not isinstance(meta, dict):
+        return None
+    metadata = meta.get("x-codex-turn-metadata")
+    if not isinstance(metadata, dict):
+        return None
+    workspaces = metadata.get("workspaces") or {}
+    if isinstance(workspaces, dict):
+        return next((path for path in workspaces if isinstance(path, str) and path), None)
+    return None
 
 
 def _tool_response(text: str, *, is_error: bool = False) -> dict[str, Any]:
@@ -157,7 +172,7 @@ def handle_request(message: Any) -> dict[str, Any] | None:
             "result": {
                 "protocolVersion": requested or PROTOCOL_VERSION,
                 "capabilities": {"tools": {"listChanged": False}},
-                "serverInfo": {"name": "mem0", "version": "0.3.0"},
+                "serverInfo": {"name": "mem0", "version": PLUGIN_VERSION},
             },
         }
     if method == "ping":
@@ -187,7 +202,9 @@ def handle_request(message: Any) -> dict[str, Any] | None:
             result = _tool_response("Unknown Mem0 tool.", is_error=True)
         else:
             try:
-                result = _tool_response(call_search_memories(params.get("arguments")))
+                result = _tool_response(
+                    call_search_memories(params.get("arguments"), _workspace_cwd(params))
+                )
             except ToolInputError as exc:
                 result = _tool_response(str(exc), is_error=True)
             except Exception:

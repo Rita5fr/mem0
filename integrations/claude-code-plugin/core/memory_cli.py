@@ -11,6 +11,7 @@ import telemetry
 from memory_core import (
     EvidenceStore,
     api_key,
+    configure_harness,
     data_dir,
     doctor,
     forget_remote_repo,
@@ -31,7 +32,7 @@ def _print_status(value: dict) -> None:
     )
     print(
         f"Used in this repository: {value['retrievals']} memories returned, "
-        f"{value['sidekick_runs']} sidekick runs"
+        f"{value['subagent_runs']} subagent runs"
     )
     if last:
         item_label = ""
@@ -47,19 +48,20 @@ def _print_status(value: dict) -> None:
             f"{'succeeded' if last['success'] else 'failed'} "
             f"({last['duration_ms']:.1f} ms{item_label})"
         )
-    sidekick = value.get("last_sidekick") or {}
-    if sidekick:
-        state = "finished" if sidekick.get("stopped_at") else "started"
+    subagent = value.get("last_subagent") or {}
+    if subagent:
+        state = "finished" if subagent.get("stopped_at") else "started"
         print(
-            "Last sidekick: "
-            f"{state}, received {sidekick['context_chars']} characters of memory, "
-            f"agent {sidekick['agent_id']}"
+            "Last subagent: "
+            f"{state}, received {subagent['context_chars']} characters of memory, "
+            f"agent {subagent['agent_id']}"
         )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--plugin-data-dir", default="")
+    parser.add_argument("--harness", default="")
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     status = subparsers.add_parser("status")
@@ -77,6 +79,10 @@ def main() -> int:
     forget.add_argument("--include-project-memory", action="store_true")
 
     args = parser.parse_args()
+    if args.harness:
+        source_tag = f"{args.harness.replace('-', '_')}_plugin"
+        configure_harness(args.harness, source_tag=source_tag)
+        telemetry.init(harness=args.harness, source_tag=source_tag.upper())
     if args.plugin_data_dir:
         os.environ["MEM0_CODE_DATA_DIR"] = args.plugin_data_dir
     store = EvidenceStore()

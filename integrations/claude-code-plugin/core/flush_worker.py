@@ -17,7 +17,7 @@ import telemetry
 from memory_core import (
     EvidenceStore,
     checkpoint_session,
-    record_stop,
+    configure_harness,
     touch_handoff_heartbeat,
 )
 
@@ -27,15 +27,28 @@ def main() -> int:
         return 2
     handoff_path = Path(sys.argv[1])
     os.environ["MEM0_CODE_HANDOFF_PATH"] = str(handoff_path)
+    harness = os.environ.get("MEM0_PLUGIN_HARNESS")
+    if harness:
+        source_tag = os.environ.get("MEM0_PLUGIN_SOURCE_TAG", "")
+        configure_harness(
+            harness,
+            env_prefix=os.environ.get("MEM0_PLUGIN_ENV_PREFIX", ""),
+            data_dir_name=os.environ.get("MEM0_PLUGIN_DATA_DIR_NAME", ""),
+            source_tag=source_tag,
+        )
+        telemetry.init(harness=harness, source_tag=source_tag.upper())
     completed = False
     try:
         payload = json.loads(handoff_path.read_text(encoding="utf-8"))
         delay = float(payload.get("delay_seconds") or 0)
         if delay > 0:
             payload.pop("delay_seconds", None)
-            handoff_path.write_text(
-                json.dumps(payload), encoding="utf-8"
-            )
+            temporary = handoff_path.with_suffix(f".{os.getpid()}.tmp")
+            try:
+                temporary.write_text(json.dumps(payload), encoding="utf-8")
+                temporary.replace(handoff_path)
+            finally:
+                temporary.unlink(missing_ok=True)
             time.sleep(delay)
             if not handoff_path.exists():
                 return 0
@@ -58,8 +71,7 @@ def main() -> int:
                 ):
                     touch_handoff_heartbeat()
                     time.sleep(0.25)
-                if reason == "session-end":
-                    record_stop(store, hook_input)
+            # Hooks capture the conversation before handoff; the worker only flushes it.
             result = checkpoint_session(store, hook_input, reason)
             print(json.dumps(result, sort_keys=True), flush=True)
             completed = result.get("status") in {
